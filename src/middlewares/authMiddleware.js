@@ -15,7 +15,7 @@ async function authMiddleware(req, res, next) {
   const idToken = authHeader.split(' ')[1];
 
   try {
-    const decoded = await admin.auth().verifyIdToken(idToken);
+    const decoded = await admin.verifyIdToken(idToken);
     req.firebaseUser = decoded; // { uid, email, name, ... }
     next();
   } catch (err) {

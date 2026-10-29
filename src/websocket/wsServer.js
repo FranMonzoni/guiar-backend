@@ -38,7 +38,7 @@ async function verifyFirebaseToken(req) {
     const url = new URL(req.url, 'ws://localhost');
     const token = url.searchParams.get('token');
     if (!token) return null;
-    return await admin.auth().verifyIdToken(token);
+    return await admin.verifyIdToken(token);
   } catch {
     return null;
   }

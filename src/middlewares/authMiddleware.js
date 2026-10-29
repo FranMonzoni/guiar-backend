@@ -1,27 +1,40 @@
-const admin = require('../firebase/firebaseAdmin');
+const firebaseAuth = require('../firebase/firebaseAdmin');
+const { upsertFromFirebase } = require('../services/userService');
 
 /**
- * Middleware de autenticación con Firebase.
- * Verifica el ID Token enviado en Authorization: Bearer <token>
- * Si es válido, agrega req.firebaseUser con el decoded token de Firebase.
+ * Extrae el token de "Authorization: Bearer <token>".
+ */
+function bearer(req) {
+  const header = req.headers.authorization || '';
+  return header.startsWith('Bearer ') ? header.slice(7).trim() : null;
+}
+
+/**
+ * Verifica el ID Token de Firebase (web o mobile) y deja disponibles:
+ *   req.firebaseUser → token decodificado { uid, email, name, ... }
+ *   req.user         → usuario de la base local (se crea si no existe)
  */
 async function authMiddleware(req, res, next) {
-  const authHeader = req.headers.authorization;
-
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Token de autenticación requerido.' });
+  const token = bearer(req);
+  if (!token) {
+    return res.status(401).json({ error: 'Token de autenticación requerido.', code: 'NO_TOKEN' });
   }
 
-  const idToken = authHeader.split(' ')[1];
-
+  let decoded;
   try {
-    const decoded = await admin.verifyIdToken(idToken);
-    req.firebaseUser = decoded; // { uid, email, name, ... }
-    next();
+    decoded = await firebaseAuth.verifyIdToken(token);
   } catch (err) {
-    console.error('[authMiddleware]', err.code);
-    return res.status(401).json({ error: 'Token inválido o expirado.' });
+    const expired = err.code === 'auth/id-token-expired';
+    return res.status(401).json({
+      error: expired ? 'El token expiró. Renovalo con /api/auth/refresh.' : 'Token inválido.',
+      code: expired ? 'TOKEN_EXPIRED' : 'INVALID_TOKEN'
+    });
   }
+
+  req.firebaseUser = decoded;
+  req.user = await upsertFromFirebase(decoded);
+  next();
 }
 
 module.exports = authMiddleware;
+module.exports.bearer = bearer;

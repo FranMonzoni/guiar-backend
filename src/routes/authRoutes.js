@@ -1,13 +1,20 @@
 const express = require('express');
 const router = express.Router();
-const { syncUser } = require('../controllers/authController');
+const auth = require('../controllers/authController');
 const authMiddleware = require('../middlewares/authMiddleware');
 
-// POST /api/auth/sync — Sincroniza el usuario Firebase con SQLite (crear si no existe)
-// Llamado desde el frontend justo después del login con Firebase
-router.post('/sync', authMiddleware, syncUser);
+// ── Públicas (para la app móvil / clientes sin SDK de Firebase) ──────────────
+router.post('/register', auth.register);
+router.post('/login', auth.login);
+router.post('/refresh', auth.refresh);
+router.post('/password-reset', auth.passwordReset);
 
-// GET /api/auth/sync — Alias GET para obtener el perfil actual
-router.get('/sync', authMiddleware, syncUser);
+// ── Requieren Authorization: Bearer <idToken> ────────────────────────────────
+router.get('/me', authMiddleware, auth.me);
+router.patch('/me', authMiddleware, auth.updateMe);
+
+// Compatibilidad con la versión anterior de la web
+router.get('/sync', authMiddleware, auth.me);
+router.post('/sync', authMiddleware, auth.me);
 
 module.exports = router;

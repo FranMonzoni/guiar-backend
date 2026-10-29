@@ -3,7 +3,7 @@ const router = express.Router();
 const { reportLocation } = require('../controllers/locationController');
 const authMiddleware = require('../middlewares/authMiddleware');
 
-// POST /api/locations — Reportar ubicación GPS (usado por la app móvil)
+// POST /api/locations — reportar datos de la ESP (mismo JSON que el WebSocket)
 router.post('/', authMiddleware, reportLocation);
 
 module.exports = router;

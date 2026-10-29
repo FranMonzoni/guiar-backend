@@ -1,19 +1,23 @@
-require('dotenv').config();
-
 const http = require('http');
+const config = require('./src/config');
 const app = require('./src/app');
 const { initWebSocketServer } = require('./src/websocket/wsServer');
+const { purgeOldLocations } = require('./src/services/locationService');
 
-const PORT = process.env.PORT || 3001;
-
-// Crear servidor HTTP base (necesario para adjuntarle WebSocket)
+// Servidor HTTP compartido por la API REST y el WebSocket
 const server = http.createServer(app);
-
-// Inicializar WebSocket sobre el mismo servidor HTTP
 initWebSocketServer(server);
 
-server.listen(PORT, () => {
-  console.log(`\n✅ GuiAR Backend corriendo en http://localhost:${PORT}`);
-  console.log(`   REST API:      http://localhost:${PORT}/api/health`);
-  console.log(`   WebSocket:     ws://localhost:${PORT}/ws?token=<jwt>\n`);
+// Limpieza del historial de ubicaciones (al arrancar y cada hora)
+const runPurge = () => purgeOldLocations().catch((err) => console.error('[purge]', err.message));
+runPurge();
+setInterval(runPurge, 60 * 60 * 1000).unref();
+
+server.listen(config.port, () => {
+  console.log(`\n✅ GuiAR Backend en http://localhost:${config.port}`);
+  console.log(`   REST:      http://localhost:${config.port}/api/health`);
+  console.log(`   WebSocket: ws://localhost:${config.port}/ws?token=<idToken>\n`);
+  if (!config.firebaseWebApiKey) {
+    console.warn('⚠️  Falta FIREBASE_WEB_API_KEY: /api/auth/login y /register no van a funcionar.\n');
+  }
 });

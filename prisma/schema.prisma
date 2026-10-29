@@ -1,5 +1,5 @@
-// This is your Prisma schema file
-// learn more: https://pris.ly/d/prisma-schema
+// GuiAR — esquema de base de datos
+// Docs: https://pris.ly/d/prisma-schema
 
 generator client {
   provider = "prisma-client-js"
@@ -12,38 +12,69 @@ datasource db {
 
 model User {
   id          String     @id @default(cuid())
-  firebaseUid String     @unique   // UID de Firebase Auth
+  firebaseUid String     @unique // UID de Firebase Auth
   email       String?    @unique
   displayName String     @default("Usuario")
   role        String     @default("USER") // "USER" | "ADMIN"
+
+  // Un usuario pertenece como máximo a UN grupo (groupId nullable, no es una relación N:N).
   groupId     String?
-  group       Group?     @relation("GroupMembers", fields: [groupId], references: [id])
+  group       Group?     @relation("GroupMembers", fields: [groupId], references: [id], onDelete: SetNull)
+  joinedAt    DateTime?
+
   ownedGroups Group[]    @relation("GroupOwner")
   locations   Location[]
   createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@index([groupId])
 }
 
 model Group {
-  id        String     @id @default(cuid())
-  name      String
-  // joinKey: clave única del grupo.
-  // Este valor se usa en la app como clave de cifrado de los datos ESP32.
-  joinKey   String     @unique
-  ownerId   String
-  owner     User       @relation("GroupOwner", fields: [ownerId], references: [id])
-  members   User[]     @relation("GroupMembers")
-  locations Location[]
-  createdAt DateTime   @default(now())
+  // ID público del grupo. Viaja en cada mensaje del WebSocket ("groupId").
+  id            String     @id @default(cuid())
+  name          String
+
+  // Código corto para invitar gente (ej: "K7P3QX9M"). El owner puede regenerarlo.
+  inviteCode    String     @unique
+
+  // Clave secreta de 256 bits (64 caracteres hex) que usan la app y las ESP32
+  // para cifrar los datos que se mandan entre ellas por LoRa.
+  // Solo se devuelve a los miembros del grupo, nunca al panel de administración.
+  encryptionKey String
+
+  ownerId       String
+  owner         User       @relation("GroupOwner", fields: [ownerId], references: [id])
+  members       User[]     @relation("GroupMembers")
+  locations     Location[]
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
 }
 
 model Location {
-  id        String   @id @default(cuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id])
-  groupId   String
-  group     Group    @relation(fields: [groupId], references: [id])
-  latitude  Float
-  longitude Float
-  deviceId  String   @default("unknown")
-  timestamp DateTime @default(now())
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  groupId    String
+  group      Group     @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  deviceId   String    @default("unknown")
+  latitude   Float
+  longitude  Float
+  altitude   Float?    // metros
+  speed      Float?    // m/s
+  heading    Float?    // grados 0-360 (magnetómetro / rumbo GPS)
+  accuracy   Float?    // metros (HDOP aproximado)
+  satellites Int?
+  battery    Float?    // %
+  signal     Float?    // RSSI dBm (LoRa)
+
+  // Resto del JSON de la ESP (acelerómetro, flags, etc.) guardado tal cual.
+  extra      String?
+
+  deviceTime DateTime? // hora que reporta la ESP / app
+  timestamp  DateTime  @default(now()) // hora en que llegó al servidor
+
+  @@index([groupId, timestamp])
+  @@index([userId, timestamp])
 }

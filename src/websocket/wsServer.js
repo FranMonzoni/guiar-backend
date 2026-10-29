@@ -1,177 +1,197 @@
-const { WebSocketServer, WebSocket } = require('ws');
-const admin = require('../firebase/firebaseAdmin');
+const { WebSocketServer } = require('ws');
+const firebaseAuth = require('../firebase/firebaseAdmin');
 const prisma = require('../prismaClient');
+const config = require('../config');
+const hub = require('./hub');
+const { upsertFromFirebase } = require('../services/userService');
+const { ingestReport, getLatestLocations, forgetUser } = require('../services/locationService');
+const { getGroupForMember, WS_CLOSE } = require('../services/groupService');
 
-/**
- * groupId -> Set<WebSocket>
+/*
+ * Conexión:
+ *   ws://HOST/ws?token=<idToken>
+ *   ws://HOST/ws/<groupId>?token=<idToken>     ← opcional: valida que sea tu grupo
+ *
+ * El token también puede ir en el header "Authorization: Bearer <idToken>"
+ * (apps nativas) o como primer mensaje: { "type": "auth", "token": "<idToken>" }.
+ *
+ * Mensajes que recibe el servidor:
+ *   { type: "location", groupId, email, groupCode, esp: {...} }   → ver locationService.js
+ *   { type: "ping" }                                                → responde { type: "pong" }
+ *
+ * Mensajes que envía el servidor:
+ *   connected, snapshot, location_update, presence, member_joined, member_left,
+ *   group_renamed, group_deleted, group_left, ack, error, pong
  */
-const groupConnections = new Map();
 
-function addToGroup(groupId, ws) {
-  if (!groupConnections.has(groupId)) groupConnections.set(groupId, new Set());
-  groupConnections.get(groupId).add(ws);
+const AUTH_TIMEOUT_MS = 10_000;
+
+function parseUpgradeUrl(req) {
+  const url = new URL(req.url, 'http://localhost');
+  const match = url.pathname.match(/^\/ws(?:\/([A-Za-z0-9_-]+))?\/?$/);
+  if (!match) return null;
+  return {
+    groupId: match[1] || url.searchParams.get('groupId') || null,
+    token: url.searchParams.get('token')
+  };
 }
 
-function removeFromGroup(groupId, ws) {
-  const group = groupConnections.get(groupId);
-  if (group) {
-    group.delete(ws);
-    if (group.size === 0) groupConnections.delete(groupId);
-  }
+function headerToken(req) {
+  const h = req.headers.authorization || '';
+  return h.startsWith('Bearer ') ? h.slice(7).trim() : null;
 }
 
-function broadcastToGroup(groupId, data) {
-  const group = groupConnections.get(groupId);
-  if (!group) return;
-  const payload = JSON.stringify(data);
-  group.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) client.send(payload);
-  });
-}
-
-/**
- * Extrae y verifica el Firebase ID Token del query string.
- * ws://host/ws?token=<firebase_id_token>
- */
-async function verifyFirebaseToken(req) {
+async function authenticate(token) {
+  if (!token) return null;
   try {
-    const url = new URL(req.url, 'ws://localhost');
-    const token = url.searchParams.get('token');
-    if (!token) return null;
-    return await admin.verifyIdToken(token);
+    const decoded = await firebaseAuth.verifyIdToken(token);
+    return upsertFromFirebase(decoded);
   } catch {
     return null;
   }
 }
 
-/**
- * Inicializa el servidor WebSocket sobre el servidor HTTP.
- * @param {import('http').Server} server
- */
+function sendError(ws, error, code, extra = {}) {
+  hub.send(ws, { type: 'error', error, code, ...extra });
+}
+
+/** Una vez autenticado: registra la conexión y manda el estado inicial. */
+async function attach(ws, user, requestedGroupId) {
+  if (!user) return ws.close(WS_CLOSE.UNAUTHORIZED, 'Token invalido o ausente');
+  if (!user.groupId) return ws.close(WS_CLOSE.NO_GROUP, 'El usuario no pertenece a ningun grupo');
+  if (requestedGroupId && requestedGroupId !== user.groupId) {
+    return ws.close(WS_CLOSE.NO_GROUP, 'groupId no coincide con tu grupo');
+  }
+
+  ws.userId = user.id;
+  ws.groupId = user.groupId;
+  const wasOnline = hub.isOnline(ws.groupId, ws.userId);
+  hub.add(ws);
+
+  const [group, locations] = await Promise.all([
+    getGroupForMember(ws.groupId),
+    getLatestLocations(ws.groupId)
+  ]);
+
+  hub.send(ws, {
+    type: 'connected',
+    groupId: ws.groupId,
+    userId: user.id,
+    displayName: user.displayName
+  });
+  hub.send(ws, {
+    type: 'snapshot',
+    group: { id: group.id, name: group.name, ownerId: group.ownerId, members: group.members },
+    locations
+  });
+
+  if (!wasOnline) hub.broadcast(ws.groupId, { type: 'presence', userId: user.id, online: true });
+  console.log(`[WS] ${user.displayName} conectado al grupo ${ws.groupId}`);
+}
+
+async function handleMessage(ws, msg) {
+  if (msg.type === 'ping') return hub.send(ws, { type: 'pong', t: Date.now() });
+
+  if (msg.type === 'location') {
+    // Releer el usuario: puede haber salido del grupo desde otra sesión.
+    const user = await prisma.user.findUnique({ where: { id: ws.userId } });
+    if (!user || user.groupId !== ws.groupId) {
+      return ws.close(WS_CLOSE.LEFT_GROUP, 'Ya no perteneces a este grupo');
+    }
+    try {
+      const result = await ingestReport(user, msg);
+      return hub.send(ws, { type: 'ack', ...result, ref: msg.ref ?? null });
+    } catch (err) {
+      return sendError(ws, err.status ? err.message : 'Error al procesar la ubicación.', err.code || 'SERVER_ERROR', {
+        ref: msg.ref ?? null
+      });
+    }
+  }
+
+  sendError(ws, `Tipo de mensaje desconocido: ${msg.type}`, 'UNKNOWN_TYPE');
+}
+
 function initWebSocketServer(server) {
-  const wss = new WebSocketServer({ server, path: '/ws' });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 });
 
-  wss.on('connection', async (ws, req) => {
-    // 1. Verificar token Firebase
-    const firebaseUser = await verifyFirebaseToken(req);
-    if (!firebaseUser) {
-      ws.close(4001, 'Token Firebase inválido o ausente');
-      return;
-    }
+  server.on('upgrade', (req, socket, head) => {
+    const target = parseUpgradeUrl(req);
+    if (!target) return socket.destroy();
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req, target));
+  });
 
-    // 2. Buscar usuario en SQLite
-    const dbUser = await prisma.user.findUnique({ where: { firebaseUid: firebaseUser.uid } });
-    if (!dbUser) {
-      ws.close(4002, 'Usuario no registrado. Iniciá sesión en la web primero.');
-      return;
-    }
+  wss.on('connection', async (ws, req, target) => {
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
 
-    if (!dbUser.groupId) {
-      ws.close(4003, 'El usuario no pertenece a ningún grupo.');
-      return;
-    }
+    const initialToken = target.token || headerToken(req);
+    let authTimer = null;
+    // Si el token vino en la URL/header, los mensajes que lleguen mientras se
+    // verifica esperan a que termine (la app puede mandar apenas abre).
+    const ready = initialToken
+      ? authenticate(initialToken).then((user) => attach(ws, user, target.groupId)).catch((err) => {
+          console.error('[WS] Error autenticando:', err);
+          ws.close(1011, 'Error interno');
+        })
+      : null;
 
-    const groupId = dbUser.groupId;
-    ws.userId      = dbUser.id;
-    ws.displayName = dbUser.displayName;
-    ws.groupId     = groupId;
-
-    addToGroup(groupId, ws);
-    console.log(`[WS] ${dbUser.displayName} conectado al grupo ${groupId}`);
-
-    ws.send(JSON.stringify({
-      type:        'connected',
-      message:     `Conectado al grupo ${groupId}`,
-      groupId,
-      displayName: dbUser.displayName
-    }));
-
-    // 3. Mensajes entrantes desde la app móvil
     ws.on('message', async (raw) => {
       let msg;
       try {
         msg = JSON.parse(raw.toString());
       } catch {
-        ws.send(JSON.stringify({ type: 'error', error: 'JSON inválido' }));
-        return;
+        return sendError(ws, 'JSON inválido', 'INVALID_JSON');
       }
 
-      /**
-       * Formato esperado del mensaje (enviado por la app móvil):
-       * {
-       *   type:      "location",
-       *   groupId:   "abc123",       <- debe coincidir con el grupo del usuario
-       *   email:     "user@x.com",   <- email del usuario (informativo)
-       *   groupCode: "A3F2B9C1",     <- joinKey del grupo (usado para cifrado en la ESP)
-       *   esp: {
-       *     latitude:  -34.6037,
-       *     longitude: -58.3816,
-       *     deviceId:  "ESP32_001",
-       *     battery:   85,           <- opcional
-       *     signal:    -70           <- opcional (dBm)
-       *   }
-       * }
-       */
-      if (msg.type === 'location') {
-        if (msg.groupId !== groupId) {
-          ws.send(JSON.stringify({ type: 'error', error: 'groupId no coincide con tu grupo.' }));
-          return;
-        }
+      if (ready) await ready;
 
-        const { esp } = msg;
-        if (!esp || esp.latitude === undefined || esp.longitude === undefined) {
-          ws.send(JSON.stringify({ type: 'error', error: 'Datos ESP inválidos: se requieren latitude y longitude.' }));
-          return;
-        }
+      // Autenticación por primer mensaje (si no vino el token en la URL/header)
+      if (!ws.userId) {
+        if (initialToken || msg.type !== 'auth') return sendError(ws, 'Todavía no autenticado.', 'NOT_AUTHENTICATED');
+        clearTimeout(authTimer);
+        return attach(ws, await authenticate(msg.token), target.groupId);
+      }
 
-        try {
-          const location = await prisma.location.create({
-            data: {
-              userId:    dbUser.id,
-              groupId,
-              latitude:  esp.latitude,
-              longitude: esp.longitude,
-              deviceId:  esp.deviceId || 'unknown'
-            }
-          });
-
-          const broadcastPayload = {
-            type:        'location_update',
-            userId:      dbUser.id,
-            displayName: dbUser.displayName,
-            latitude:    esp.latitude,
-            longitude:   esp.longitude,
-            deviceId:    esp.deviceId || 'unknown',
-            battery:     esp.battery ?? null,
-            signal:      esp.signal  ?? null,
-            timestamp:   location.timestamp
-          };
-
-          // Enviar a todos los miembros del grupo (incluyendo al emisor)
-          broadcastToGroup(groupId, broadcastPayload);
-          ws.send(JSON.stringify({ type: 'ack', locationId: location.id }));
-        } catch (err) {
-          console.error('[WS] Error guardando location:', err);
-          ws.send(JSON.stringify({ type: 'error', error: 'Error al guardar la ubicación.' }));
-        }
-      } else {
-        ws.send(JSON.stringify({ type: 'error', error: `Tipo de mensaje desconocido: ${msg.type}` }));
+      try {
+        await handleMessage(ws, msg);
+      } catch (err) {
+        console.error('[WS] Error procesando mensaje:', err);
+        sendError(ws, 'Error interno.', 'SERVER_ERROR');
       }
     });
 
     ws.on('close', () => {
-      console.log(`[WS] ${dbUser.displayName} desconectado`);
-      removeFromGroup(groupId, ws);
+      clearTimeout(authTimer);
+      if (!ws.userId) return;
+      hub.remove(ws);
+      if (!hub.isOnline(ws.groupId, ws.userId)) {
+        forgetUser(ws.userId);
+        hub.broadcast(ws.groupId, { type: 'presence', userId: ws.userId, online: false });
+      }
     });
 
-    ws.on('error', (err) => {
-      console.error(`[WS] Error en ${dbUser.displayName}:`, err.message);
-      removeFromGroup(groupId, ws);
-    });
+    ws.on('error', (err) => console.error('[WS] error:', err.message));
+
+    if (!initialToken) {
+      authTimer = setTimeout(() => ws.close(WS_CLOSE.UNAUTHORIZED, 'Timeout de autenticacion'), AUTH_TIMEOUT_MS);
+    }
   });
+
+  // Heartbeat: corta conexiones muertas (celular sin señal, app cerrada a la fuerza…)
+  const heartbeat = setInterval(() => {
+    for (const ws of wss.clients) {
+      if (!ws.isAlive) {
+        ws.terminate();
+        continue;
+      }
+      ws.isAlive = false;
+      ws.ping();
+    }
+  }, config.wsHeartbeatMs);
+  wss.on('close', () => clearInterval(heartbeat));
 
   console.log('[WS] Servidor WebSocket listo en /ws');
   return wss;
 }
 
-module.exports = { initWebSocketServer, broadcastToGroup };
+module.exports = { initWebSocketServer };

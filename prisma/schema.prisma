@@ -1,0 +1,49 @@
+// This is your Prisma schema file
+// learn more: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id          String     @id @default(cuid())
+  firebaseUid String     @unique   // UID de Firebase Auth
+  email       String?    @unique
+  displayName String     @default("Usuario")
+  role        String     @default("USER") // "USER" | "ADMIN"
+  groupId     String?
+  group       Group?     @relation("GroupMembers", fields: [groupId], references: [id])
+  ownedGroups Group[]    @relation("GroupOwner")
+  locations   Location[]
+  createdAt   DateTime   @default(now())
+}
+
+model Group {
+  id        String     @id @default(cuid())
+  name      String
+  // joinKey: clave única del grupo.
+  // Este valor se usa en la app como clave de cifrado de los datos ESP32.
+  joinKey   String     @unique
+  ownerId   String
+  owner     User       @relation("GroupOwner", fields: [ownerId], references: [id])
+  members   User[]     @relation("GroupMembers")
+  locations Location[]
+  createdAt DateTime   @default(now())
+}
+
+model Location {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  groupId   String
+  group     Group    @relation(fields: [groupId], references: [id])
+  latitude  Float
+  longitude Float
+  deviceId  String   @default("unknown")
+  timestamp DateTime @default(now())
+}

@@ -30,7 +30,13 @@ async function stats(req, res) {
 async function listGroups(req, res) {
   const search = String(req.query.search || '').trim();
   const where = search
-    ? { OR: [{ name: { contains: search } }, { id: { contains: search } }, { owner: { email: { contains: search.toLowerCase() } } }] }
+    ? {
+        OR: [
+          { name: { contains: search, mode: 'insensitive' } },
+          { id: { contains: search } },
+          { owner: { email: { contains: search, mode: 'insensitive' } } }
+        ]
+      }
     : {};
 
   const [list, activity] = await Promise.all([
@@ -97,7 +103,12 @@ async function deleteGroup(req, res) {
 async function listUsers(req, res) {
   const search = String(req.query.search || '').trim();
   const where = search
-    ? { OR: [{ displayName: { contains: search } }, { email: { contains: search.toLowerCase() } }] }
+    ? {
+        OR: [
+          { displayName: { contains: search, mode: 'insensitive' } },
+          { email: { contains: search, mode: 'insensitive' } }
+        ]
+      }
     : {};
 
   const users = await prisma.user.findMany({

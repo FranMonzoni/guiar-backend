@@ -3,29 +3,27 @@ services:
   - type: web
     name: guiar-backend
     runtime: node
-    # SQLite necesita disco persistente, y los discos no están disponibles en el plan Free.
-    plan: starter
+    # El plan Free no tiene disco persistente: los datos viven en Postgres (Neon).
+    plan: free
     region: virginia
-    buildCommand: npm ci
-    # Las migraciones corren al arrancar para que el disco ya esté montado.
-    startCommand: npm run db:deploy && npm start
+    # Las migraciones se aplican en cada deploy, usando DIRECT_URL.
+    buildCommand: npm ci && npx prisma migrate deploy
+    startCommand: npm start
     healthCheckPath: /api/health
-    disk:
-      name: guiar-data
-      mountPath: /var/data
-      sizeGB: 1
     envVars:
       - key: NODE_VERSION
         value: "22"
       - key: NODE_ENV
         value: production
-      - key: DATABASE_URL
-        value: file:/var/data/guiar.db
       - key: LOCATION_RETENTION_HOURS
         value: "48"
       - key: LOCATION_MIN_INTERVAL_MS
         value: "2000"
       # Valores secretos o propios de cada deploy: se cargan en el dashboard de Render.
+      - key: DATABASE_URL # Neon, conexión pooled
+        sync: false
+      - key: DIRECT_URL # Neon, conexión directa
+        sync: false
       - key: FIREBASE_WEB_API_KEY
         sync: false
       - key: FIREBASE_SERVICE_ACCOUNT_JSON

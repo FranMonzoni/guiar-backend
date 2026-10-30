@@ -5,41 +5,45 @@ API REST + WebSocket para GuiAR: cuentas, grupos y ubicaciones en vivo de los di
 ```
 ESP32 ──BLE/WiFi──► App móvil ──WebSocket / REST──► Backend ──WebSocket──► Web (mapa)
                                                        │
-                                                   SQLite (Prisma)
+                                                  Postgres (Prisma)
 ```
 
 ## Puesta en marcha
 
-Requisitos: Node.js 22 o superior.
+Requisitos: Node.js 22 o superior y una base Postgres (por ejemplo, un proyecto gratis en [Neon](https://neon.tech)).
 
 ```bash
 npm install
-cp .env.example .env          # completar FIREBASE_WEB_API_KEY y ADMIN_EMAILS
+cp .env.example .env          # completar DATABASE_URL, DIRECT_URL, FIREBASE_WEB_API_KEY y ADMIN_EMAILS
 # copiar serviceAccountKey.json (Firebase → Configuración → Cuentas de servicio) a la raíz
-npm run db:migrate            # crea prisma/dev.db con el esquema
+npm run db:migrate            # aplica las migraciones en la base
 npm run dev
 ```
 
-> **Si ya tenías una base de la versión anterior**: el esquema cambió (`joinKey` → `inviteCode` + `encryptionKey`). Borrá `prisma/dev.db` (y `prisma/prisma/dev.db` si existe) antes de `npm run db:migrate`, o aceptá el reset cuando Prisma lo pida.
+`DATABASE_URL` es la conexión que usa el backend (en Neon, la *pooled*) y `DIRECT_URL` la que usa Prisma para migrar (en Neon, la directa). Con otro Postgres sin pooler, pueden ser la misma URL.
 
 ## Deploy en Render
 
 El repo incluye [`render.yaml`](render.yaml): en Render, **New → Blueprint** y elegí este repositorio.
 
-Crea un web service con plan **Starter** y un disco de 1 GB montado en `/var/data`, donde vive la base SQLite. El plan Free no sirve: no admite discos y la base se perdería en cada reinicio.
+Crea un web service en el plan **Free**. Los datos viven en Postgres (Neon), así que no se pierden cuando el servicio se reinicia.
 
 Al crear el Blueprint, Render pide estos valores:
 
 | Variable | Valor |
 |---|---|
+| `DATABASE_URL` | Connection string *pooled* de Neon (host con `-pooler`) |
+| `DIRECT_URL` | Connection string directa de Neon |
 | `FIREBASE_WEB_API_KEY` | Web API Key del proyecto de Firebase |
 | `FIREBASE_SERVICE_ACCOUNT_JSON` | El contenido completo de `serviceAccountKey.json` |
 | `ADMIN_EMAILS` | Emails de los administradores, separados por coma |
 | `CORS_ORIGINS` | URL de la web (ej: `https://guiar.example.com`). Vacío acepta cualquier origen |
 
-`PORT` lo define Render. Las migraciones se aplican solas en cada arranque (`npm run db:deploy`).
+`PORT` lo define Render. Las migraciones se aplican solas en cada deploy (`npx prisma migrate deploy`, durante el build).
 
-Usá una sola instancia: la base está en el disco de ese servidor y las conexiones WebSocket se guardan en memoria.
+En el plan Free, el servicio se duerme tras 15 minutos sin tráfico y tarda alrededor de 1 minuto en despertar. Para mantenerlo despierto, configurá un monitor como [UptimeRobot](https://uptimerobot.com) que llame a `/api/health` cada 10 minutos.
+
+Usá una sola instancia: las conexiones WebSocket se guardan en memoria.
 
 ### Hacerse admin
 

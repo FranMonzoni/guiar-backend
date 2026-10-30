@@ -1,0 +1,36 @@
+# Blueprint de Render: https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: guiar-backend
+    runtime: node
+    # SQLite necesita disco persistente, y los discos no están disponibles en el plan Free.
+    plan: starter
+    region: virginia
+    buildCommand: npm ci
+    # Las migraciones corren al arrancar para que el disco ya esté montado.
+    startCommand: npm run db:deploy && npm start
+    healthCheckPath: /api/health
+    disk:
+      name: guiar-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        value: file:/var/data/guiar.db
+      - key: LOCATION_RETENTION_HOURS
+        value: "48"
+      - key: LOCATION_MIN_INTERVAL_MS
+        value: "2000"
+      # Valores secretos o propios de cada deploy: se cargan en el dashboard de Render.
+      - key: FIREBASE_WEB_API_KEY
+        sync: false
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: ADMIN_EMAILS
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false

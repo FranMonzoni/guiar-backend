@@ -22,6 +22,25 @@ npm run dev
 
 > **Si ya tenías una base de la versión anterior**: el esquema cambió (`joinKey` → `inviteCode` + `encryptionKey`). Borrá `prisma/dev.db` (y `prisma/prisma/dev.db` si existe) antes de `npm run db:migrate`, o aceptá el reset cuando Prisma lo pida.
 
+## Deploy en Render
+
+El repo incluye [`render.yaml`](render.yaml): en Render, **New → Blueprint** y elegí este repositorio.
+
+Crea un web service con plan **Starter** y un disco de 1 GB montado en `/var/data`, donde vive la base SQLite. El plan Free no sirve: no admite discos y la base se perdería en cada reinicio.
+
+Al crear el Blueprint, Render pide estos valores:
+
+| Variable | Valor |
+|---|---|
+| `FIREBASE_WEB_API_KEY` | Web API Key del proyecto de Firebase |
+| `FIREBASE_SERVICE_ACCOUNT_JSON` | El contenido completo de `serviceAccountKey.json` |
+| `ADMIN_EMAILS` | Emails de los administradores, separados por coma |
+| `CORS_ORIGINS` | URL de la web (ej: `https://guiar.example.com`). Vacío acepta cualquier origen |
+
+`PORT` lo define Render. Las migraciones se aplican solas en cada arranque (`npm run db:deploy`).
+
+Usá una sola instancia: la base está en el disco de ese servidor y las conexiones WebSocket se guardan en memoria.
+
 ### Hacerse admin
 
 Agregá tu email a `ADMIN_EMAILS` en `.env` (se aplica al iniciar sesión), o:

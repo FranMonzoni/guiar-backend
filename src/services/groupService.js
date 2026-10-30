@@ -178,10 +178,10 @@ async function assertOwner(user) {
 
 async function kickMember(owner, memberId) {
   const group = await assertOwner(owner);
-  if (memberId === owner.id) throw new HttpError(400, 'No podés expulsarte a vos mismo. Usá "Salir del grupo".');
+  if (memberId === owner.id) throw new HttpError(400, 'No podés expulsarte a vos mismo. Usá "Salir del grupo".', 'CANNOT_KICK_SELF');
 
   const member = await prisma.user.findUnique({ where: { id: memberId } });
-  if (!member || member.groupId !== group.id) throw new HttpError(404, 'Ese usuario no es miembro del grupo.');
+  if (!member || member.groupId !== group.id) throw new HttpError(404, 'Ese usuario no es miembro del grupo.', 'NOT_A_MEMBER');
 
   await removeFromGroup(memberId, { reason: 'Te quitaron del grupo.' });
   return getGroupForMember(group.id);
@@ -203,7 +203,7 @@ async function renameGroup(owner, name) {
 /** Admin: elimina un grupo completo (miembros quedan sin grupo, ubicaciones se borran). */
 async function deleteGroup(groupId) {
   const exists = await prisma.group.findUnique({ where: { id: groupId } });
-  if (!exists) throw new HttpError(404, 'Grupo no encontrado.');
+  if (!exists) throw new HttpError(404, 'Grupo no encontrado.', 'GROUP_NOT_FOUND');
 
   await prisma.$transaction([
     prisma.user.updateMany({ where: { groupId }, data: { groupId: null, joinedAt: null } }),

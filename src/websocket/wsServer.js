@@ -1,4 +1,4 @@
-const { WebSocketServer } = require('ws');
+const { WebSocket, WebSocketServer } = require('ws');
 const firebaseAuth = require('../firebase/firebaseAdmin');
 const prisma = require('../prismaClient');
 const config = require('../config');
@@ -45,7 +45,7 @@ async function authenticate(token) {
   if (!token) return null;
   try {
     const decoded = await firebaseAuth.verifyIdToken(token);
-    return upsertFromFirebase(decoded);
+    return await upsertFromFirebase(decoded);
   } catch {
     return null;
   }
@@ -57,6 +57,9 @@ function sendError(ws, error, code, extra = {}) {
 
 /** Una vez autenticado: registra la conexión y manda el estado inicial. */
 async function attach(ws, user, requestedGroupId) {
+  // El cliente pudo desconectarse mientras se verificaba el token: su evento
+  // 'close' ya pasó, así que si se registra acá quedaría "en línea" para siempre.
+  if (ws.readyState !== WebSocket.OPEN) return;
   if (!user) return ws.close(WS_CLOSE.UNAUTHORIZED, 'Token invalido o ausente');
   if (!user.groupId) return ws.close(WS_CLOSE.NO_GROUP, 'El usuario no pertenece a ningun grupo');
   if (requestedGroupId && requestedGroupId !== user.groupId) {
@@ -85,7 +88,9 @@ async function attach(ws, user, requestedGroupId) {
     locations
   });
 
-  if (!wasOnline) hub.broadcast(ws.groupId, { type: 'presence', userId: user.id, online: true });
+  if (!wasOnline && ws.readyState === WebSocket.OPEN) {
+    hub.broadcast(ws.groupId, { type: 'presence', userId: user.id, online: true });
+  }
   console.log(`[WS] ${user.displayName} conectado al grupo ${ws.groupId}`);
 }
 
@@ -142,17 +147,21 @@ function initWebSocketServer(server) {
       } catch {
         return sendError(ws, 'JSON inválido', 'INVALID_JSON');
       }
+      // `null`, números o arrays son JSON válido, pero no son un mensaje.
+      if (!msg || typeof msg !== 'object' || Array.isArray(msg)) {
+        return sendError(ws, 'El mensaje debe ser un objeto JSON.', 'INVALID_MESSAGE');
+      }
 
       if (ready) await ready;
 
-      // Autenticación por primer mensaje (si no vino el token en la URL/header)
-      if (!ws.userId) {
-        if (initialToken || msg.type !== 'auth') return sendError(ws, 'Todavía no autenticado.', 'NOT_AUTHENTICATED');
-        clearTimeout(authTimer);
-        return attach(ws, await authenticate(msg.token), target.groupId);
-      }
-
       try {
+        // Autenticación por primer mensaje (si no vino el token en la URL/header)
+        if (!ws.userId) {
+          if (initialToken || msg.type !== 'auth') return sendError(ws, 'Todavía no autenticado.', 'NOT_AUTHENTICATED');
+          clearTimeout(authTimer);
+          return await attach(ws, await authenticate(msg.token), target.groupId);
+        }
+
         await handleMessage(ws, msg);
       } catch (err) {
         console.error('[WS] Error procesando mensaje:', err);

@@ -34,8 +34,11 @@ app.use((err, req, res, next) => {
   if (err.type === 'entity.parse.failed') {
     return res.status(400).json({ error: 'JSON inválido.', code: 'INVALID_JSON' });
   }
+  if (err.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'El cuerpo de la solicitud es demasiado grande.', code: 'PAYLOAD_TOO_LARGE' });
+  }
   if (err.status && err.status < 500) {
-    return res.status(err.status).json({ error: err.message, code: err.code });
+    return res.status(err.status).json({ error: err.message, code: err.code || 'BAD_REQUEST' });
   }
   console.error(`[${req.method} ${req.path}]`, err);
   res.status(err.status || 500).json({ error: err.status ? err.message : 'Error interno del servidor.', code: err.code || 'SERVER_ERROR' });

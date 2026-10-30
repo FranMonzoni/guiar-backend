@@ -117,6 +117,8 @@ ws://HOST:3001/ws/<groupId>?token=<idToken>
 
 Respuestas: `{ "type": "ack", "saved": true, "locationId": "…", "warnings": [], "ref": 42 }` o `{ "type": "error", "error": "…", "code": "…", "ref": 42 }`.
 
+Los mensajes tienen que ser objetos JSON: si no se puede parsear llega `INVALID_JSON`, y si es JSON válido pero no un objeto (`null`, un número, un array) llega `INVALID_MESSAGE`. En ambos casos la conexión sigue abierta.
+
 Todas las ubicaciones se retransmiten en vivo; en la base se guarda como máximo una cada `LOCATION_MIN_INTERVAL_MS` por usuario, y el historial se borra pasadas `LOCATION_RETENTION_HOURS`.
 
 Mismo formato por REST: `POST /api/locations` (útil si se corta el WS o para probar con Postman).
@@ -153,3 +155,16 @@ Ningún endpoint de admin devuelve coordenadas ni la clave de cifrado.
 ## Errores
 
 Siempre `{ "error": "mensaje para mostrar", "code": "CODIGO" }` con el status HTTP correspondiente.
+
+| Status | `code` | Cuándo |
+|---|---|---|
+| 400 | `INVALID_ROLE` | `role` no es `ADMIN` ni `USER` |
+| 400 | `CANNOT_DEMOTE_SELF` | Un admin intenta quitarse el rol |
+| 400 | `CANNOT_DELETE_SELF` | Un admin intenta borrar su propia cuenta |
+| 400 | `CANNOT_KICK_SELF` | El owner intenta expulsarse (tiene que usar `/leave`) |
+| 400 | `BAD_REQUEST` | Otro error de la solicitud sin código propio |
+| 404 | `GROUP_NOT_FOUND` / `USER_NOT_FOUND` | El grupo o usuario no existe (admin) |
+| 404 | `NOT_A_MEMBER` | Se intenta expulsar a alguien que no es del grupo |
+| 413 | `PAYLOAD_TOO_LARGE` | El cuerpo supera los 32 KB |
+
+Los demás códigos están en la sección de cada endpoint.

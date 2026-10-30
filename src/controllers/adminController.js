@@ -73,7 +73,7 @@ async function getGroup(req, res) {
       members: { select: { id: true, displayName: true, email: true, joinedAt: true }, orderBy: { joinedAt: 'asc' } }
     }
   });
-  if (!g) throw new HttpError(404, 'Grupo no encontrado.');
+  if (!g) throw new HttpError(404, 'Grupo no encontrado.', 'GROUP_NOT_FOUND');
 
   const online = new Set(hub.onlineUserIds(g.id));
   const activity = await prisma.location.aggregate({ where: { groupId: g.id }, _max: { timestamp: true } });
@@ -118,16 +118,16 @@ async function listUsers(req, res) {
 /** PATCH /api/admin/users/:id  { role: "ADMIN" | "USER" } */
 async function updateUser(req, res) {
   const { role } = req.body || {};
-  if (!['ADMIN', 'USER'].includes(role)) throw new HttpError(400, 'role debe ser "ADMIN" o "USER".');
+  if (!['ADMIN', 'USER'].includes(role)) throw new HttpError(400, 'role debe ser "ADMIN" o "USER".', 'INVALID_ROLE');
   if (req.params.id === req.user.id && role !== 'ADMIN') {
-    throw new HttpError(400, 'No podés quitarte el rol de admin a vos mismo.');
+    throw new HttpError(400, 'No podés quitarte el rol de admin a vos mismo.', 'CANNOT_DEMOTE_SELF');
   }
 
   const user = await prisma.user.update({
     where: { id: req.params.id },
     data: { role },
     select: { id: true, email: true, displayName: true, role: true }
-  }).catch(() => { throw new HttpError(404, 'Usuario no encontrado.'); });
+  }).catch(() => { throw new HttpError(404, 'Usuario no encontrado.', 'USER_NOT_FOUND'); });
 
   res.json({ user });
 }
@@ -138,10 +138,10 @@ async function updateUser(req, res) {
  * borra sus datos locales y su cuenta de Firebase.
  */
 async function deleteUser(req, res) {
-  if (req.params.id === req.user.id) throw new HttpError(400, 'No podés eliminar tu propia cuenta desde el panel.');
+  if (req.params.id === req.user.id) throw new HttpError(400, 'No podés eliminar tu propia cuenta desde el panel.', 'CANNOT_DELETE_SELF');
 
   const user = await prisma.user.findUnique({ where: { id: req.params.id } });
-  if (!user) throw new HttpError(404, 'Usuario no encontrado.');
+  if (!user) throw new HttpError(404, 'Usuario no encontrado.', 'USER_NOT_FOUND');
 
   if (user.groupId) await groups.removeFromGroup(user.id, { reason: 'Tu cuenta fue eliminada.' });
   await prisma.user.delete({ where: { id: user.id } }); // Location → onDelete: Cascade

@@ -3,13 +3,14 @@ const config = require('./src/config');
 const app = require('./src/app');
 const { initWebSocketServer } = require('./src/websocket/wsServer');
 const { purgeOldLocations } = require('./src/services/locationService');
+const { log } = require('./src/utils/log');
 
 // Servidor HTTP compartido por la API REST y el WebSocket
 const server = http.createServer(app);
 initWebSocketServer(server);
 
 // Limpieza del historial de ubicaciones (al arrancar y cada hora)
-const runPurge = () => purgeOldLocations().catch((err) => console.error('[purge]', err.message));
+const runPurge = () => purgeOldLocations().catch((err) => log.error('[purge]', err));
 runPurge();
 setInterval(runPurge, 60 * 60 * 1000).unref();
 

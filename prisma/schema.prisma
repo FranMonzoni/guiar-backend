@@ -25,6 +25,7 @@ model User {
 
   ownedGroups Group[]    @relation("GroupOwner")
   locations   Location[]
+  device      Device?    // la pulsera vinculada (como máximo una)
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
 
@@ -39,10 +40,13 @@ model Group {
   // Código corto para invitar gente (ej: "K7P3QX9M"). El owner puede regenerarlo.
   inviteCode    String     @unique
 
-  // Clave secreta de 256 bits (64 caracteres hex) que usan la app y las ESP32
-  // para cifrar los datos que se mandan entre ellas por LoRa.
-  // Solo se devuelve a los miembros del grupo, nunca al panel de administración.
+  // Clave secreta AES-256 (32 bytes, guardada en hex) que usan la app y las pulseras
+  // para cifrar lo que se mandan por LoRa. La API la entrega en base64 y solo a
+  // miembros del grupo; nunca al panel de administración ni a los logs.
   encryptionKey String
+  // Sube en 1 cada vez que la clave se renueva (al salir o quitar un miembro).
+  keyVersion    Int        @default(1)
+  keyRotatedAt  DateTime?
 
   ownerId       String
   owner         User       @relation("GroupOwner", fields: [ownerId], references: [id])
@@ -65,12 +69,16 @@ model Location {
   altitude   Float?    // metros
   speed      Float?    // m/s
   heading    Float?    // grados 0-360 (magnetómetro / rumbo GPS)
-  accuracy   Float?    // metros (HDOP aproximado)
+  accuracy   Float?    // metros
+  hdop       Float?    // dilución horizontal de precisión del GPS (sin unidad)
+  gpsFix     Boolean?  // el GPS de la pulsera tenía fix
+  simulated  Boolean   @default(false) // la app marcó la ubicación como simulada
   satellites Int?
   battery    Float?    // %
   signal     Float?    // RSSI dBm (LoRa)
 
-  // Resto del JSON de la ESP (acelerómetro, flags, etc.) guardado tal cual.
+  // Campos extra chicos del JSON de la ESP (ej. accel). La telemetría completa
+  // NO se guarda por punto: solo la última, en Device.telemetry.
   extra      String?
 
   deviceTime DateTime? // hora que reporta la ESP / app
@@ -78,4 +86,19 @@ model Location {
 
   @@index([groupId, timestamp])
   @@index([userId, timestamp])
+}
+
+// Pulsera vinculada a un usuario. Regla: una pulsera por usuario y un usuario por pulsera.
+// Se vincula sola con la primera ubicación que manda; para cambiarla hay que desvincularla.
+model Device {
+  id         String    @id @default(cuid())
+  deviceId   String    @unique // ID que reporta la pulsera (esp.deviceId)
+  userId     String    @unique
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name       String?   // telemetry.sensors.identity.data.name
+  firmware   String?   // telemetry.sensors.identity.data.fw
+  lastSeenAt DateTime?
+  telemetry  String?   // último bloque esp.telemetry recibido (JSON)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
 }

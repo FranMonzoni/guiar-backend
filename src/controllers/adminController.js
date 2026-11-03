@@ -8,6 +8,7 @@ const prisma = require('../prismaClient');
 const firebaseAuth = require('../firebase/firebaseAdmin');
 const hub = require('../websocket/hub');
 const groups = require('../services/groupService');
+const { forgetDevice } = require('../services/deviceService');
 const { HttpError } = require('../utils/httpError');
 
 async function lastActivityByGroup() {
@@ -155,7 +156,8 @@ async function deleteUser(req, res) {
   if (!user) throw new HttpError(404, 'Usuario no encontrado.', 'USER_NOT_FOUND');
 
   if (user.groupId) await groups.removeFromGroup(user.id, { reason: 'Tu cuenta fue eliminada.' });
-  await prisma.user.delete({ where: { id: user.id } }); // Location → onDelete: Cascade
+  await prisma.user.delete({ where: { id: user.id } }); // Location y Device → onDelete: Cascade
+  forgetDevice(user.id);
 
   let firebaseDeleted = true;
   await firebaseAuth.deleteUser(user.firebaseUid).catch(() => { firebaseDeleted = false; });

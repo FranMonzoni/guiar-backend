@@ -81,18 +81,70 @@ Cada grupo tiene tres datos distintos:
 |---|---|---|
 | `id` | ID público. Va en cada mensaje del WebSocket (`groupId`). | Miembros y admin |
 | `inviteCode` | Código corto (8 caracteres, sin 0/O/1/I/L) para invitar. El owner puede regenerarlo. | Miembros |
-| `encryptionKey` | Clave AES-256 (64 hex) para que la app y las ESP32 cifren lo que se mandan por LoRa. | **Solo miembros** |
+| `encryption` | Clave AES-256 compartida para que la app y las pulseras cifren lo que se mandan por LoRa. | **Solo miembros** |
 
 | Método | Ruta | Body | Notas |
 |---|---|---|---|
-| POST | `/api/groups` | `{ name }` | Crea el grupo. `409 ALREADY_IN_GROUP` si ya estás en uno. |
-| POST | `/api/groups/join` | `{ code }` | Acepta minúsculas, espacios y guiones. |
-| GET | `/api/groups/me` | — | `{ group }` o `{ group: null }` |
+| POST | `/api/groups` | `{ name }` | Crea el grupo → `{ group }`. `409 ALREADY_IN_GROUP` si ya estás en uno. |
+| POST | `/api/groups/join` | `{ code }` | Acepta minúsculas, espacios y guiones → `{ group }`. |
+| GET | `/api/groups/me` | — | **Respuesta plana** con la clave (ver abajo). Sin grupo → `404 NO_GROUP`. |
 | PATCH | `/api/groups/me` | `{ name }` | Solo owner |
 | POST | `/api/groups/me/leave` | — | `{ ok, groupDeleted }` |
 | POST | `/api/groups/me/invite-code` | — | Nuevo código (solo owner). El anterior deja de servir. |
+| POST | `/api/groups/me/encryption/rotate` | — | Clave nueva a mano (solo owner) → `{ group }` |
 | DELETE | `/api/groups/me/members/:userId` | — | Expulsar (solo owner) |
-| GET | `/api/groups/me/locations` | — | Última ubicación de cada miembro |
+| GET | `/api/groups/me/locations` | — | `{ groupId, locations[], devices[] }`: última ubicación y pulsera de cada miembro |
+
+Todas las respuestas de `/api/groups` llevan `Cache-Control: no-store`.
+
+### GET /api/groups/me (ID del grupo y clave para la app)
+
+El usuario sale del token de Firebase; la clave solo se entrega si es miembro del grupo.
+
+```json
+{
+  "id": "cmvzsmctk0006k21r18bknjed",
+  "name": "Cosquín Rock",
+  "encryption": {
+    "algorithm": "AES-256",
+    "key": "q83vEjRWeJASNFZ4kBI0VniQEjRWeJASNFZ4kBI0Vng=",
+    "encoding": "base64",
+    "keyVersion": 1,
+    "rotatedAt": null
+  },
+  "inviteCode": "K7P3QX9M",
+  "ownerId": "…",
+  "owner": { "id": "…", "displayName": "Ana" },
+  "createdAt": "…",
+  "memberCount": 2,
+  "members": [{ "id": "…", "displayName": "Ana", "email": "…", "joinedAt": "…", "isOwner": true, "online": true }]
+}
+```
+
+`key` son 32 bytes en base64. La clave nunca viaja por el WebSocket ni se escribe en los logs (`src/utils/log.js` tapa claves y tokens en todo lo que se loguea).
+
+### Renovación de la clave
+
+- **Cuándo**: automáticamente cuando un miembro sale, es expulsado o un admin borra su cuenta (quien se va conocía la clave). El owner también puede renovarla a mano.
+- **Qué pasa**: el backend genera una clave nueva y sube `keyVersion` en 1. A los miembros conectados les llega por WebSocket `{ "type": "key_rotated", "keyVersion": 3, "reason": "member_left" | "manual" }`, **sin la clave**.
+- **Qué hace la app**: al recibir `key_rotated` (o si `snapshot.group.keyVersion` no coincide con la que tiene guardada al reconectar) pide `GET /api/groups/me` y le pasa a la pulsera la clave nueva junto con `keyVersion`.
+- **Qué hace la pulsera** (a implementar en el firmware): manda `keyVersion` en cada paquete LoRa; guarda la clave nueva y conserva la anterior unos minutos para poder leer los paquetes de pulseras que todavía no se actualizaron. Un paquete con una versión que no conoce se descarta.
+
+## Pulseras
+
+Cada usuario tiene **como máximo una pulsera** y cada pulsera pertenece a **un solo usuario**. La pulsera se vincula sola con el primer mensaje que manda la app con su `esp.deviceId`.
+
+| Caso | Respuesta |
+|---|---|
+| Llega otro `deviceId` desde una cuenta que ya tiene pulsera | `409 DEVICE_MISMATCH` (hay que desvincular la actual) |
+| Llega un `deviceId` que está vinculado a otra cuenta | `409 DEVICE_IN_USE` |
+| Falta `esp.deviceId` | `400 MISSING_DEVICE_ID` |
+| `deviceId` con caracteres fuera de `A-Z a-z 0-9 . _ : -` o más de 64 | `400 INVALID_DEVICE_ID` |
+
+| Método | Ruta | Notas |
+|---|---|---|
+| GET | `/api/devices/me` | `{ device: { deviceId, name, firmware, lastSeenAt, telemetry } }` o `{ device: null }` |
+| DELETE | `/api/devices/me` | Desvincula la pulsera para poder usar otra. `404 NO_DEVICE` si no tenía. |
 
 ## WebSocket de ubicaciones
 
@@ -102,6 +154,7 @@ ws://HOST:3001/ws/<groupId>?token=<idToken>
 
 - `<groupId>` es opcional (`/ws?token=...` también funciona); si va, tiene que ser tu grupo.
 - Apps nativas pueden mandar el token en el header `Authorization: Bearer ...`, o como primer mensaje `{ "type": "auth", "token": "..." }` (hay 10 s para hacerlo).
+- Cada mensaje puede pesar hasta 32 KB.
 
 ### Mensaje de la app → servidor
 
@@ -110,39 +163,51 @@ ws://HOST:3001/ws/<groupId>?token=<idToken>
   "type": "location",
   "ref": 42,
   "groupId": "cmh1x7…",
-  "email": "user@mail.com",
-  "groupCode": "K7P3QX9M",
+  "email": "usuario@example.com",
   "esp": {
-    "deviceId": "GUIAR-01",
-    "latitude": -31.4201,
-    "longitude": -64.1888,
-    "altitude": 410.2,
-    "speed": 1.3,
-    "heading": 87,
-    "accuracy": 4.5,
+    "deviceId": "device-001",
+    "latitude": -31.425,
+    "longitude": -62.084,
+    "timestamp": 1793656799500,
+    "telemetry": {
+      "schemaVersion": 1,
+      "appVersion": 4,
+      "transport": "ble",
+      "sentAt": 1793656800000,
+      "simulatedLocation": false,
+      "sensors": {
+        "identity":     { "receivedAt": 1793656799500, "ageMs": 500, "stale": false, "data": { "name": "Pulsera", "id": "device-001", "fw": "0.1", "wifi": false } },
+        "imu":          { "receivedAt": 1793656799500, "ageMs": 500, "stale": false, "data": { "accel_g": [0.01, -0.02, 0.98], "gyro_dps": [1.2, -0.4, 0.1], "temp_c": 26.5 } },
+        "gps":          { "receivedAt": 1793656799500, "ageMs": 500, "stale": false, "data": { "connected": true, "fix": true, "lat": -31.425, "lon": -62.084, "sats": 9, "hdop": 1.2, "age_s": 0 } },
+        "magnetometer": { "receivedAt": 1793656799500, "ageMs": 500, "stale": false, "data": { "chip": "QMC5883P", "raw_xyz": [120, -35, 208] } },
+        "diagnostics":  { "receivedAt": 1793656799500, "ageMs": 500, "stale": false, "data": { "uptime_s": 120, "i2c": ["0x2c", "0x68"], "errors": [] } }
+      }
+    },
     "satellites": 9,
-    "battery": 82,
-    "signal": -97,
-    "timestamp": 1761751200000,
+    "gpsHdop": 1.2,
     "accel": { "x": 0.01, "y": -0.02, "z": 0.98 }
   }
 }
 ```
 
-| Campo | Obligatorio | Validación |
+| Campo | Obligatorio | Validación / uso |
 |---|---|---|
 | `groupId` | sí | Debe ser el grupo del usuario del token (`GROUP_MISMATCH`). |
 | `email` | no | Si viene, debe ser el del token (`EMAIL_MISMATCH`). |
 | `groupCode` | no | Si no coincide con el código vigente, se acepta igual con un `warning` en el ack. |
-| `esp.latitude` / `esp.longitude` | sí | También `lat`, `lng`/`lon`. Rango válido. |
-| `esp.*` | no | `altitude/alt`, `speed` (m/s), `heading` (0–360), `accuracy/hdop`, `satellites/sats`, `battery` (0–100), `signal/rssi`, `timestamp/time` (s, ms o ISO). Cualquier otro campo (ej: `accel`) se guarda en `extra` (máx 4 KB). |
+| `esp.deviceId` | **sí** | La pulsera del usuario (ver **Pulseras**). |
+| `esp.latitude` / `esp.longitude` | sí, salvo que venga `telemetry` | También `lat`, `lng`/`lon`, o `telemetry.sensors.gps.data.lat/lon`. Sin coordenadas pero con `telemetry`, se acepta: se actualiza el estado de la pulsera y no se guarda punto (`device_update`). |
+| `esp.satellites` | no | También `sats` o `telemetry...gps.data.sats`. Entero 0–255. |
+| `esp.gpsHdop` | no | También `hdop` o `telemetry...gps.data.hdop`. 0–100. |
+| `esp.telemetry` | no | Objeto de hasta 12 KB. Se guarda **solo la última** por pulsera (no por punto) y se reenvía a los miembros. Si no es un objeto o es más grande, se descarta con un `warning` y el resto del mensaje se procesa igual. `telemetry.sensors.gps.data.fix` se guarda en el punto (`gpsFix`) y `simulatedLocation` como `simulated`. |
+| `esp.*` | no | `altitude/alt`, `speed` (m/s), `heading` (0–360), `accuracy` (m), `battery` (0–100), `signal/rssi`, `timestamp/time` (s, ms o ISO). Cualquier otro campo (ej: `accel`) se guarda en `extra` (máx 4 KB). |
 | `ref` | no | Se devuelve en el `ack` / `error` para emparejar respuestas. |
 
-Respuestas: `{ "type": "ack", "saved": true, "locationId": "…", "warnings": [], "ref": 42 }` o `{ "type": "error", "error": "…", "code": "…", "ref": 42 }`.
+Respuestas: `{ "type": "ack", "saved": true, "locationId": "…", "deviceId": "device-001", "warnings": [], "ref": 42 }` o `{ "type": "error", "error": "…", "code": "…", "ref": 42 }`.
 
 Los mensajes tienen que ser objetos JSON: si no se puede parsear llega `INVALID_JSON`, y si es JSON válido pero no un objeto (`null`, un número, un array) llega `INVALID_MESSAGE`. En ambos casos la conexión sigue abierta.
 
-Todas las ubicaciones se retransmiten en vivo; en la base se guarda como máximo una cada `LOCATION_MIN_INTERVAL_MS` por usuario, y el historial se borra pasadas `LOCATION_RETENTION_HOURS`.
+Todas las ubicaciones se retransmiten en vivo; en la base se guarda como máximo una cada `LOCATION_MIN_INTERVAL_MS` por usuario, y el historial se borra pasadas `LOCATION_RETENTION_HOURS`. El estado de la pulsera se escribe como máximo cada 5 s (lo último siempre queda guardado).
 
 Mismo formato por REST: `POST /api/locations` (útil si se corta el WS o para probar con Postman).
 
@@ -151,8 +216,10 @@ Mismo formato por REST: `POST /api/locations` (útil si se corta el WS o para pr
 | `type` | Cuándo | Contenido |
 |---|---|---|
 | `connected` | Al conectar | `groupId, userId, displayName` |
-| `snapshot` | Al conectar | `group { id, name, ownerId, members[] }`, `locations[]` |
-| `location_update` | Alguien mandó ubicación | `location { userId, displayName, latitude, longitude, heading, battery, … }` |
+| `snapshot` | Al conectar | `group { id, name, ownerId, keyVersion, members[] }`, `locations[]`, `devices[]` |
+| `location_update` | Alguien mandó ubicación | `location { userId, latitude, longitude, heading, satellites, hdop, gpsFix, simulated, battery, … }` + `device { userId, deviceId, name, firmware, lastSeenAt, telemetry }` |
+| `device_update` | Llegó telemetría sin coordenadas, o alguien desvinculó su pulsera | `userId`, `device` (o `null`) |
+| `key_rotated` | Se renovó la clave del grupo | `keyVersion`, `reason`: pedir la clave con `GET /api/groups/me` |
 | `presence` | Alguien se conectó/desconectó | `userId, online` |
 | `member_joined` / `member_left` | Cambió el grupo | `member` / `userId, newOwnerId` |
 | `group_renamed` | El owner cambió el nombre | `name` |

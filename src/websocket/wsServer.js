@@ -2,10 +2,12 @@ const { WebSocket, WebSocketServer } = require('ws');
 const firebaseAuth = require('../firebase/firebaseAdmin');
 const prisma = require('../prismaClient');
 const config = require('../config');
+const { log } = require('../utils/log');
 const hub = require('./hub');
 const { upsertFromFirebase } = require('../services/userService');
 const { ingestReport, getLatestLocations, forgetUser } = require('../services/locationService');
 const { getGroupForMember, WS_CLOSE } = require('../services/groupService');
+const { getGroupDevices } = require('../services/deviceService');
 
 /*
  * Conexión:
@@ -20,8 +22,10 @@ const { getGroupForMember, WS_CLOSE } = require('../services/groupService');
  *   { type: "ping" }                                                → responde { type: "pong" }
  *
  * Mensajes que envía el servidor:
- *   connected, snapshot, location_update, presence, member_joined, member_left,
- *   group_renamed, group_deleted, group_left, ack, error, pong
+ *   connected, snapshot (grupo + ubicaciones + pulseras), location_update (con device),
+ *   device_update (pulsera sin coordenadas o desvinculada), key_rotated (pedir la clave
+ *   nueva por GET /api/groups/me), presence, member_joined, member_left, group_renamed,
+ *   group_deleted, group_left, ack, error, pong
  */
 
 const AUTH_TIMEOUT_MS = 10_000;
@@ -71,9 +75,10 @@ async function attach(ws, user, requestedGroupId) {
   const wasOnline = hub.isOnline(ws.groupId, ws.userId);
   hub.add(ws);
 
-  const [group, locations] = await Promise.all([
+  const [group, locations, devices] = await Promise.all([
     getGroupForMember(ws.groupId),
-    getLatestLocations(ws.groupId)
+    getLatestLocations(ws.groupId),
+    getGroupDevices(ws.groupId)
   ]);
 
   hub.send(ws, {
@@ -84,14 +89,22 @@ async function attach(ws, user, requestedGroupId) {
   });
   hub.send(ws, {
     type: 'snapshot',
-    group: { id: group.id, name: group.name, ownerId: group.ownerId, members: group.members },
-    locations
+    // Sin la clave: se pide por GET /api/groups/me. keyVersion sirve para saber si cambió.
+    group: {
+      id: group.id,
+      name: group.name,
+      ownerId: group.ownerId,
+      keyVersion: group.encryption.keyVersion,
+      members: group.members
+    },
+    locations,
+    devices
   });
 
   if (!wasOnline && ws.readyState === WebSocket.OPEN) {
     hub.broadcast(ws.groupId, { type: 'presence', userId: user.id, online: true });
   }
-  console.log(`[WS] ${user.displayName} conectado al grupo ${ws.groupId}`);
+  log.info(`[WS] ${user.displayName} conectado al grupo ${ws.groupId}`);
 }
 
 async function handleMessage(ws, msg) {
@@ -117,7 +130,7 @@ async function handleMessage(ws, msg) {
 }
 
 function initWebSocketServer(server) {
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 32 * 1024 });
 
   server.on('upgrade', (req, socket, head) => {
     const target = parseUpgradeUrl(req);
@@ -135,7 +148,7 @@ function initWebSocketServer(server) {
     // verifica esperan a que termine (la app puede mandar apenas abre).
     const ready = initialToken
       ? authenticate(initialToken).then((user) => attach(ws, user, target.groupId)).catch((err) => {
-          console.error('[WS] Error autenticando:', err);
+          log.error('[WS] Error autenticando:', err);
           ws.close(1011, 'Error interno');
         })
       : null;
@@ -164,7 +177,7 @@ function initWebSocketServer(server) {
 
         await handleMessage(ws, msg);
       } catch (err) {
-        console.error('[WS] Error procesando mensaje:', err);
+        log.error('[WS] Error procesando mensaje:', err);
         sendError(ws, 'Error interno.', 'SERVER_ERROR');
       }
     });
@@ -179,7 +192,7 @@ function initWebSocketServer(server) {
       }
     });
 
-    ws.on('error', (err) => console.error('[WS] error:', err.message));
+    ws.on('error', (err) => log.error('[WS] error:', err));
 
     if (!initialToken) {
       authTimer = setTimeout(() => ws.close(WS_CLOSE.UNAUTHORIZED, 'Timeout de autenticacion'), AUTH_TIMEOUT_MS);

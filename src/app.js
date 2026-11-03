@@ -1,11 +1,13 @@
 const express = require('express');
 const cors = require('cors');
 const config = require('./config');
+const { log } = require('./utils/log');
 
 const authRoutes = require('./routes/authRoutes');
 const groupRoutes = require('./routes/groupRoutes');
 const locationRoutes = require('./routes/locationRoutes');
 const adminRoutes = require('./routes/adminRoutes');
+const deviceRoutes = require('./routes/deviceRoutes');
 
 const app = express();
 
@@ -18,6 +20,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/groups', groupRoutes);
 app.use('/api/locations', locationRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/devices', deviceRoutes);
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
@@ -40,7 +43,7 @@ app.use((err, req, res, next) => {
   if (err.status && err.status < 500) {
     return res.status(err.status).json({ error: err.message, code: err.code || 'BAD_REQUEST' });
   }
-  console.error(`[${req.method} ${req.path}]`, err);
+  log.error(`[${req.method} ${req.path}]`, err);
   res.status(err.status || 500).json({ error: err.status ? err.message : 'Error interno del servidor.', code: err.code || 'SERVER_ERROR' });
 });
 

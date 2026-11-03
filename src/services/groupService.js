@@ -21,9 +21,29 @@ function generateInviteCode() {
   return code;
 }
 
-/** 32 bytes aleatorios en hex = clave AES-256 lista para usar en la ESP32 (mbedTLS). */
+/** 32 bytes aleatorios = clave AES-256. Se guarda en hex y se entrega en base64. */
 function generateEncryptionKey() {
   return randomBytes(32).toString('hex');
+}
+
+/**
+ * Bloque de cifrado que reciben los miembros (GET /api/groups/me).
+ * La app lo pasa a la pulsera por BLE; `keyVersion` permite saber si la pulsera
+ * tiene la clave vigente.
+ */
+function encryptionFor(group) {
+  return {
+    algorithm: 'AES-256',
+    key: Buffer.from(group.encryptionKey, 'hex').toString('base64'),
+    encoding: 'base64',
+    keyVersion: group.keyVersion ?? 1,
+    rotatedAt: group.keyRotatedAt ?? null
+  };
+}
+
+/** Datos para renovar la clave dentro de un update de Prisma. */
+function rotatedKeyData() {
+  return { encryptionKey: generateEncryptionKey(), keyVersion: { increment: 1 }, keyRotatedAt: new Date() };
 }
 
 /** "k7p3-qx9m " → "K7P3QX9M" */
@@ -46,7 +66,8 @@ async function withUniqueCode(fn) {
 const MEMBER_SELECT = { id: true, displayName: true, email: true, joinedAt: true };
 
 /**
- * Grupo completo para un MIEMBRO (incluye la clave de cifrado).
+ * Grupo completo para un MIEMBRO (incluye la clave de cifrado en `encryption`).
+ * Nunca usar en respuestas del panel de administración.
  */
 async function getGroupForMember(groupId) {
   const group = await prisma.group.findUnique({
@@ -63,7 +84,7 @@ async function getGroupForMember(groupId) {
     id: group.id,
     name: group.name,
     inviteCode: group.inviteCode,
-    encryptionKey: group.encryptionKey,
+    encryption: encryptionFor(group),
     ownerId: group.ownerId,
     owner: group.owner,
     createdAt: group.createdAt,
@@ -87,10 +108,6 @@ async function createGroup(user, name) {
 
   const groupId = await withUniqueCode((inviteCode) =>
     prisma.$transaction(async (tx) => {
-      const fresh = await tx.user.findUnique({ where: { id: user.id } });
-      if (fresh.groupId) {
-        throw new HttpError(409, 'Ya pertenecés a un grupo. Salí primero para crear otro.', 'ALREADY_IN_GROUP');
-      }
       const group = await tx.group.create({
         data: {
           name: groupName,
@@ -99,7 +116,15 @@ async function createGroup(user, name) {
           ownerId: user.id
         }
       });
-      await tx.user.update({ where: { id: user.id }, data: { groupId: group.id, joinedAt: new Date() } });
+      // Igual que en joinGroup: solo asigna si el usuario sigue sin grupo. Si otra
+      // request lo metió en un grupo mientras tanto, la transacción se deshace entera.
+      const { count } = await tx.user.updateMany({
+        where: { id: user.id, groupId: null },
+        data: { groupId: group.id, joinedAt: new Date() }
+      });
+      if (count === 0) {
+        throw new HttpError(409, 'Ya pertenecés a un grupo. Salí primero para crear otro.', 'ALREADY_IN_GROUP');
+      }
       return group.id;
     })
   );
@@ -136,6 +161,8 @@ async function joinGroup(user, rawCode) {
  * Saca a un usuario de su grupo. Borra sus ubicaciones en ese grupo.
  * Si era el owner, el miembro más antiguo pasa a ser owner.
  * Si era el último miembro, el grupo se elimina.
+ * Si el grupo sigue, la clave de cifrado se RENUEVA (keyVersion + 1): quien salió
+ * conocía la anterior. A los que quedan les llega `key_rotated` por WebSocket.
  */
 async function removeFromGroup(userId, { reason = 'Saliste del grupo.' } = {}) {
   const result = await prisma.$transaction(async (tx) => {
@@ -153,16 +180,18 @@ async function removeFromGroup(userId, { reason = 'Saliste del grupo.' } = {}) {
       await tx.group.delete({ where: { id: groupId } });
       return { groupId, groupDeleted: true, newOwnerId: null };
     }
-    if (group.ownerId === userId) {
-      await tx.group.update({ where: { id: groupId }, data: { ownerId: next.id } });
-      return { groupId, groupDeleted: false, newOwnerId: next.id };
-    }
-    return { groupId, groupDeleted: false, newOwnerId: null };
+    const newOwnerId = group.ownerId === userId ? next.id : null;
+    const updated = await tx.group.update({
+      where: { id: groupId },
+      data: { ...rotatedKeyData(), ...(newOwnerId ? { ownerId: newOwnerId } : {}) }
+    });
+    return { groupId, groupDeleted: false, newOwnerId, keyVersion: updated.keyVersion };
   });
 
   hub.closeUser(result.groupId, userId, WS_CLOSE.LEFT_GROUP, reason);
   if (!result.groupDeleted) {
     hub.broadcast(result.groupId, { type: 'member_left', userId, newOwnerId: result.newOwnerId });
+    hub.broadcast(result.groupId, { type: 'key_rotated', keyVersion: result.keyVersion, reason: 'member_left' });
   }
   return result;
 }
@@ -190,6 +219,14 @@ async function kickMember(owner, memberId) {
 async function regenerateInviteCode(owner) {
   const group = await assertOwner(owner);
   await withUniqueCode((inviteCode) => prisma.group.update({ where: { id: group.id }, data: { inviteCode } }));
+  return getGroupForMember(group.id);
+}
+
+/** El creador renueva la clave a mano (por ejemplo, si cree que se filtró). */
+async function rotateKey(owner) {
+  const group = await assertOwner(owner);
+  const updated = await prisma.group.update({ where: { id: group.id }, data: rotatedKeyData() });
+  hub.broadcast(group.id, { type: 'key_rotated', keyVersion: updated.keyVersion, reason: 'manual' });
   return getGroupForMember(group.id);
 }
 
@@ -221,6 +258,7 @@ module.exports = {
   removeFromGroup,
   kickMember,
   regenerateInviteCode,
+  rotateKey,
   renameGroup,
   deleteGroup
 };
